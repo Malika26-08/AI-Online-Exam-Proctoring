@@ -1,0 +1,35 @@
+{
+  "metadata": {
+    "generated_at": "2026-08-13T15:03:14.110909+00:00",
+    "dataset_name": "Students' Abnormal Behavior in Online Exam Dataset",
+    "reference_paper_dataset": "S_OCA",
+    "motion_threshold": 340000,
+    "frame_skip": 3,
+    "target_classes": [
+      "eye_movement",
+      "hand_move",
+      "mobile_use",
+      "side_watching",
+      "mouth_open"
+    ],
+    "num_classes": 5
+  },
+  "summary": {
+    "total_items": 5575,
+    "split_counts": {
+      "train": 4395,
+      "val": 1099,
+      "test": 81
+    },
+    "class_counts": {
+      "eye_movement": 1159,
+      "hand_move": 1229,
+      "mobile_use": 1043,
+      "side_watching": 1179,
+      "mouth_open": 901
+    },
+    "total_annotations": 5511,
+    "duplicates_found": 5
+  },
+  "items": []
+}

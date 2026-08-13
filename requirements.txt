@@ -1,0 +1,30 @@
+# Requirements for Abnormal Activity Detection in Online Exams
+# Based on project_report.pdf (Ramzan et al., 2024)
+
+# Deep Learning Frameworks
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Computer Vision & Image Processing
+opencv-python>=4.8.0
+pillow>=10.0.0
+
+# Scientific Computing & Data Analysis
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Machine Learning Evaluation & Metrics
+scikit-learn>=1.3.0
+
+# Visualization & Plotting
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Object Detection & Model Architecture
+ultralytics>=8.0.0
+
+# Demo Web Dashboard
+streamlit>=1.28.0
+
+# Automated Testing
+pytest>=7.4.0
