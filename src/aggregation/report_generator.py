@@ -51,7 +51,7 @@ class ReportGenerator:
         # Construct structured timeline entries
         timeline = []
         for idx, alert in enumerate(alerts, start=1):
-            timeline.append({
+            entry = {
                 "alert_id": idx,
                 "start_time": self._format_timestamp(alert.start_time_sec),
                 "end_time": self._format_timestamp(alert.end_time_sec),
@@ -62,7 +62,11 @@ class ReportGenerator:
                 "peak_confidence": alert.peak_confidence,
                 "average_confidence": alert.average_confidence,
                 "key_frame_count": alert.key_frame_count
-            })
+            }
+            if hasattr(alert, "agreeing_models"):
+                entry["agreeing_models"] = ", ".join(alert.agreeing_models)
+                entry["num_agreeing_models"] = alert.num_agreeing_models
+            timeline.append(entry)
 
         report_data = {
             "session_metadata": {
@@ -109,11 +113,15 @@ class ReportGenerator:
     @staticmethod
     def _export_csv(timeline: List[Dict[str, Any]], csv_path: Path):
         """Exports timeline array to CSV file."""
-        fieldnames = [
-            "alert_id", "start_time", "end_time", "start_time_sec",
-            "end_time_sec", "duration_sec", "predicted_class",
-            "peak_confidence", "average_confidence", "key_frame_count"
-        ]
+        if not timeline:
+            fieldnames = [
+                "alert_id", "start_time", "end_time", "start_time_sec",
+                "end_time_sec", "duration_sec", "predicted_class",
+                "peak_confidence", "average_confidence", "key_frame_count"
+            ]
+        else:
+            fieldnames = list(timeline[0].keys())
+
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()

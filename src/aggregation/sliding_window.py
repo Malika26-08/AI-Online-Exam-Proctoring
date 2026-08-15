@@ -38,6 +38,20 @@ class FlaggedSegmentAlert:
     key_frame_count: int
 
 
+@dataclass
+class ConsensusSegmentAlert:
+    """Represents a merged consensus abnormal segment alert across multiple CNN models."""
+    start_time_sec: float
+    end_time_sec: float
+    duration_sec: float
+    predicted_class: str
+    agreeing_models: List[str]
+    num_agreeing_models: int
+    peak_confidence: float
+    average_confidence: float
+    key_frame_count: int
+
+
 class SlidingWindowAggregator:
     """
     Maintains a temporal sliding window over key-frame predictions.
@@ -161,3 +175,80 @@ class SlidingWindowAggregator:
 
         merged.append(current)
         return merged
+
+
+def merge_multimodel_alerts(
+    model_alerts_dict: Dict[str, List[FlaggedSegmentAlert]],
+    gap_tolerance_sec: float = 3.0
+) -> List[ConsensusSegmentAlert]:
+    """
+    Merges per-model flagged segment alerts across multiple CNN models into unified consensus alerts.
+    
+    Args:
+        model_alerts_dict: Dictionary mapping model display name -> list of FlaggedSegmentAlert.
+        gap_tolerance_sec: Time gap tolerance in seconds to merge contiguous/overlapping intervals.
+
+    Returns:
+        List of ConsensusSegmentAlert sorted chronologically.
+    """
+    if not model_alerts_dict:
+        return []
+
+    # Group alerts by predicted class
+    class_groups: Dict[str, List[Tuple[str, FlaggedSegmentAlert]]] = {}
+    for model_name, alerts in model_alerts_dict.items():
+        for alert in alerts:
+            cls = alert.predicted_class
+            if cls not in class_groups:
+                class_groups[cls] = []
+            class_groups[cls].append((model_name, alert))
+
+    consensus_alerts: List[ConsensusSegmentAlert] = []
+
+    for cls, items in class_groups.items():
+        # Sort items by start_time_sec
+        items_sorted = sorted(items, key=lambda x: x[1].start_time_sec)
+
+        # Merge overlapping/contiguous intervals for this class
+        merged_clusters: List[List[Tuple[str, FlaggedSegmentAlert]]] = []
+        for model_name, alert in items_sorted:
+            if not merged_clusters:
+                merged_clusters.append([(model_name, alert)])
+            else:
+                last_cluster = merged_clusters[-1]
+                max_end = max(a.end_time_sec for _, a in last_cluster)
+                if alert.start_time_sec <= max_end + gap_tolerance_sec:
+                    last_cluster.append((model_name, alert))
+                else:
+                    merged_clusters.append([(model_name, alert)])
+
+        for cluster in merged_clusters:
+            start_time = min(a.start_time_sec for _, a in cluster)
+            end_time = max(a.end_time_sec for _, a in cluster)
+            duration = max(0.0, end_time - start_time)
+
+            agreeing_models = list(dict.fromkeys(m for m, _ in cluster))
+            num_agreeing = len(agreeing_models)
+
+            peak_conf = max(a.peak_confidence for _, a in cluster)
+            avg_conf = float(np.mean([a.average_confidence for _, a in cluster]))
+            total_frames = max(a.key_frame_count for _, a in cluster)
+
+            consensus_alerts.append(
+                ConsensusSegmentAlert(
+                    start_time_sec=round(start_time, 2),
+                    end_time_sec=round(end_time, 2),
+                    duration_sec=round(duration, 2),
+                    predicted_class=cls,
+                    agreeing_models=agreeing_models,
+                    num_agreeing_models=num_agreeing,
+                    peak_confidence=round(peak_conf, 4),
+                    average_confidence=round(avg_conf, 4),
+                    key_frame_count=total_frames
+                )
+            )
+
+    # Sort consensus alerts chronologically by start_time_sec
+    consensus_alerts.sort(key=lambda x: x.start_time_sec)
+    return consensus_alerts
+
