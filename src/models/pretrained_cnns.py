@@ -69,8 +69,8 @@ class InceptionV3Classifier(BaseExamClassifier):
             except Exception as e:
                 logger.warning(f"Could not load InceptionV3 pretrained weights online: {e}. Fallback to uninitialized weights.")
 
-        # Set aux_logits=True during initialization for standard InceptionV3 training support
-        self.backbone = torchvision_models.inception_v3(weights=weights, aux_logits=True)
+        # Set aux_logits=True for standard InceptionV3 training support and transform_input=False for consistent scaling across pretrained flags
+        self.backbone = torchvision_models.inception_v3(weights=weights, aux_logits=True, transform_input=False)
 
         # Replace main classifier head
         in_features = self.backbone.fc.in_features

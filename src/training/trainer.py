@@ -199,8 +199,14 @@ class ExamModelTrainer:
             "smoke_test": smoke_test
         }
 
-        best_weights_path = self.weights_dir / f"{self.model_name}_best.pt"
-        latest_weights_path = self.weights_dir / f"{self.model_name}_latest.pt"
+        if smoke_test:
+            best_weights_path = self.weights_dir / f"{self.model_name}_smoke_best.pt"
+            latest_weights_path = self.weights_dir / f"{self.model_name}_smoke_latest.pt"
+            history_path = self.results_dir / f"training_history_{self.model_name}_smoke.json"
+        else:
+            best_weights_path = self.weights_dir / f"{self.model_name}_best.pt"
+            latest_weights_path = self.weights_dir / f"{self.model_name}_latest.pt"
+            history_path = self.results_dir / f"training_history_{self.model_name}.json"
 
         # Resume logic
         if resume and not smoke_test and latest_weights_path.exists():
@@ -275,7 +281,6 @@ class ExamModelTrainer:
                 break
 
         # Save training history JSON
-        history_path = self.results_dir / f"training_history_{self.model_name}.json"
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
 

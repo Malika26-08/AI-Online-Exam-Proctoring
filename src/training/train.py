@@ -7,7 +7,7 @@ configurable epochs, batch size, learning rate, and smoke-test mode.
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from src.config import (
     DEFAULT_IMAGE_SIZE, INCEPTION_IMAGE_SIZE, DEFAULT_BATCH_SIZE,
@@ -34,7 +34,9 @@ def run_training_pipeline(
     learning_rate: float = DEFAULT_LEARNING_RATE,
     smoke_test: bool = False,
     resume: bool = True,
-    dataset_dir: Path = RAW_PUBLIC_DATASET_DIR
+    dataset_dir: Path = RAW_PUBLIC_DATASET_DIR,
+    weights_dir: Optional[Path] = None,
+    results_dir: Optional[Path] = None
 ) -> Dict[str, Any]:
     """
     Executes training pipeline for specified CNN model(s).
@@ -55,11 +57,17 @@ def run_training_pipeline(
             max_samples_per_split=16 if smoke_test else None
         )
 
-        trainer = ExamModelTrainer(
-            model_name=target_model,
-            pretrained=True if target_model != "custom_cnn" else False,
-            learning_rate=learning_rate
-        )
+        kwargs = {
+            "model_name": target_model,
+            "pretrained": True if target_model != "custom_cnn" else False,
+            "learning_rate": learning_rate
+        }
+        if weights_dir is not None:
+            kwargs["weights_dir"] = weights_dir
+        if results_dir is not None:
+            kwargs["results_dir"] = results_dir
+
+        trainer = ExamModelTrainer(**kwargs)
 
         history = trainer.train(
             train_loader=train_loader,

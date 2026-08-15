@@ -103,8 +103,8 @@ def test_trainer_smoke_test_custom_cnn(tmp_path):
 
     assert history["model_name"] == "custom_cnn"
     assert history["smoke_test"] is True
-    assert (weights_dir / "custom_cnn_best.pt").exists()
-    assert (results_dir / "training_history_custom_cnn.json").exists()
+    assert (weights_dir / "custom_cnn_smoke_best.pt").exists()
+    assert (results_dir / "training_history_custom_cnn_smoke.json").exists()
 
 
 def test_training_pipeline_cli_smoke_test(tmp_path):
@@ -117,7 +117,9 @@ def test_training_pipeline_cli_smoke_test(tmp_path):
         epochs=1,
         batch_size=4,
         smoke_test=True,
-        dataset_dir=RAW_PUBLIC_DATASET_DIR
+        dataset_dir=RAW_PUBLIC_DATASET_DIR,
+        weights_dir=tmp_path / "weights",
+        results_dir=tmp_path / "results"
     )
 
     assert "custom_cnn" in results
