@@ -105,3 +105,12 @@ def test_yolov5_branch_and_data_yaml(tmp_path):
 
     assert generated_path.exists()
     assert generated_path.is_file()
+
+
+def test_yolov5_prediction_interface():
+    """Test YOLOv5Detector predict_frame with a dummy frame matrix."""
+    import numpy as np
+    detector = YOLOv5Detector()
+    dummy_frame = np.zeros((224, 224, 3), dtype=np.uint8)
+    detections = detector.predict_frame(dummy_frame)
+    assert isinstance(detections, list)

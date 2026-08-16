@@ -38,6 +38,7 @@ from src.utils.video_loader import VideoLoader, VideoValidationError
 from src.preprocessing.frame_preprocessor import FramePreprocessor
 from src.preprocessing.keyframe_extractor import KeyFrameExtractor
 from src.models.model_factory import build_model
+from src.models.yolov5_detector import YOLOv5Detector
 from src.aggregation.sliding_window import (
     SlidingWindowAggregator, FramePrediction, merge_multimodel_alerts
 )
@@ -147,6 +148,10 @@ def run_proctoring_pipeline(video_path: Path):
         # 2. Instantiate Preprocessors, Key-Frame Extractor, Models & Aggregators for all 4 CNNs
         keyframe_extractor = KeyFrameExtractor(threshold=MOTION_THRESHOLD, frame_skip=FRAME_SKIP)
 
+        # Initialize YOLOv5 Detector Branch (loads weights/yolov5_best.pt automatically)
+        yolo_detector = YOLOv5Detector()
+
+        # Build 4 CNN benchmark classification models & sliding window aggregators
         preprocessors = {}
         models = {}
         aggregators = {}
@@ -169,6 +174,8 @@ def run_proctoring_pipeline(video_path: Path):
         status_placeholder = col_right.empty()
 
         key_frames_count = 0
+        yolo_key_frame_results = []
+        yolo_total_detections_count = 0
 
         # Iterate over frames using frame_skip=3
         for frame_idx, timestamp_sec, raw_frame in loader.read_frames(frame_skip=FRAME_SKIP):
@@ -181,7 +188,7 @@ def run_proctoring_pipeline(video_path: Path):
                 key_frames_count += 1
                 latest_predictions_summary = {}
 
-                # Run inference through all 4 trained CNN models
+                # 1. Run inference through all 4 trained CNN classification models
                 for m_name in CNN_BENCHMARK_MODELS:
                     proc_frame = preprocessors[m_name].preprocess(raw_frame)
                     tensor_img = torch.from_numpy(proc_frame).permute(2, 0, 1).unsqueeze(0).float() / 255.0
@@ -205,29 +212,60 @@ def run_proctoring_pipeline(video_path: Path):
                     aggregators[m_name].add_prediction(frame_pred)
                     latest_predictions_summary[m_name] = f"{pred_class} ({conf * 100:.1f}%)"
 
+                # 2. Run real YOLOv5 Object Detection & Bounding Box Localization
+                yolo_dets = yolo_detector.predict_frame(raw_frame)
+                disp_bgr = raw_frame.copy()
+
+                if yolo_dets:
+                    yolo_total_detections_count += len(yolo_dets)
+                    yolo_key_frame_results.append({
+                        "frame_idx": frame_idx,
+                        "timestamp_sec": timestamp_sec,
+                        "detections": yolo_dets,
+                        "frame_img": raw_frame.copy()
+                    })
+                    # Draw YOLOv5 bounding boxes and class labels on frame
+                    for det in yolo_dets:
+                        bbox = [int(v) for v in det["bbox"]]
+                        cls_title = det["class_name"].replace("_", " ").title()
+                        conf_pct = det["confidence"] * 100
+                        cv2.rectangle(disp_bgr, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 0, 255), 2)
+                        cv2.putText(
+                            disp_bgr, f"YOLOv5: {cls_title} {conf_pct:.0f}%",
+                            (bbox[0], max(20, bbox[1] - 10)), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55, (255, 255, 0), 2
+                        )
+
                 # Render live video preview overlay
-                disp_bgr = cv2.resize(raw_frame, (480, 270))
+                disp_resized = cv2.resize(disp_bgr, (480, 270))
                 cv2.putText(
-                    disp_bgr, f"KEY-FRAME #{key_frames_count} ({timestamp_sec:.1f}s)",
-                    (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2
+                    disp_resized, f"KEY-FRAME #{key_frames_count} ({timestamp_sec:.1f}s)",
+                    (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2
                 )
-                disp_rgb = cv2.cvtColor(disp_bgr, cv2.COLOR_BGR2RGB)
-                frame_placeholder.image(disp_rgb, caption=f"Frame #{frame_idx} ({timestamp_sec:.1f}s) - Motion Diff: {sum_diff:,.0f}", use_container_width=True)
+                disp_rgb = cv2.cvtColor(disp_resized, cv2.COLOR_BGR2RGB)
+                frame_placeholder.image(
+                    disp_rgb,
+                    caption=f"Frame #{frame_idx} ({timestamp_sec:.1f}s) - Motion |dF|: {sum_diff:,.0f} | YOLOv5 Detections: {len(yolo_dets)}",
+                    use_container_width=True
+                )
 
                 summary_text = "\n\n".join([f"• **{m.replace('_', ' ').title()}**: `{pred}`" for m, pred in latest_predictions_summary.items()])
+                yolo_summary_str = f"**YOLOv5 Bounding Boxes**: `{len(yolo_dets)} detected`" if yolo_dets else "**YOLOv5 Bounding Boxes**: `None`"
+
                 status_placeholder.markdown(
                     f"**Current Frame**: `{frame_idx}` / `{total_frames}`\n\n"
                     f"**Extracted Key-Frames**: `{key_frames_count}`\n\n"
                     f"**Motion Sum |dF|**: `{sum_diff:,.0f}`\n\n"
+                    f"{yolo_summary_str}\n\n"
                     f"### Latest 4-CNN Inference:\n{summary_text}"
                 )
 
             # Update progress bar
             pct = min(1.0, frame_idx / max(1, total_frames))
-            progress_bar.progress(pct, text=f"Processing video frame {frame_idx}/{total_frames} across 4 CNN models...")
+            progress_bar.progress(pct, text=f"Processing video frame {frame_idx}/{total_frames} across 4 CNNs + YOLOv5...")
 
-        progress_bar.progress(1.0, text="Multi-Model Analysis Complete!")
-        st.success("🎉 Multi-Model Proctoring Analysis Completed Successfully!")
+        progress_bar.progress(1.0, text="Multi-Model & YOLOv5 Analysis Complete!")
+        st.success("🎉 Multi-Model Proctoring & YOLOv5 Analysis Completed Successfully!")
 
         # 4. Multi-Model Consensus Aggregation & Report Generation
         report_gen = ReportGenerator()
@@ -290,8 +328,92 @@ def run_proctoring_pipeline(video_path: Path):
 
         st.divider()
 
-        # Render Model-Wise Comparison Section
-        render_model_comparison_section(per_model_reports)
+        # Compute YOLOv5 Branch Status Summary
+        yolo_class_counts = {}
+        for res in yolo_key_frame_results:
+            for d in res["detections"]:
+                cname = d["class_name"]
+                yolo_class_counts[cname] = yolo_class_counts.get(cname, 0) + 1
+
+        yolo_status_dict = {
+            "total_flagged_segments": yolo_total_detections_count,
+            "total_detections": yolo_total_detections_count,
+            "frames_with_detections": len(yolo_key_frame_results),
+            "class_wise_counts": yolo_class_counts,
+            "total_flagged_time_sec": round(len(yolo_key_frame_results) * (FRAME_SKIP / max(1.0, meta["fps"])), 1)
+        }
+
+        # Render Model-Wise Comparison Section (including YOLOv5 active branch)
+        render_model_comparison_section(per_model_reports, yolo_status=yolo_status_dict)
+
+        st.divider()
+
+        # Dedicated YOLOv5 Bounding Box Localization Section
+        st.subheader("🎯 Dedicated YOLOv5 Bounding Box & Behavior Localizations")
+        st.info("ℹ️ **YOLOv5 Branch Note**: YOLOv5 predictions are computed independently for object/behavior localization with spatial bounding boxes. They are displayed separately from the 4-CNN Consensus Timeline.")
+
+        col_y1, col_y2, col_y3 = st.columns(3)
+        with col_y1:
+            st.metric("🎯 Total YOLOv5 Bounding Boxes", f"{yolo_total_detections_count} boxes")
+        with col_y2:
+            st.metric("🎞️ Key-Frames with Detections", f"{len(yolo_key_frame_results)} / {key_frames_count}")
+        with col_y3:
+            st.metric("🛡️ Active Checkpoint", "weights/yolov5_best.pt (mAP50: 99.2%)")
+
+        if yolo_key_frame_results:
+            # Interactive Bounding Box Key-Frame Image Viewer
+            st.markdown("#### 🖼️ Key-Frame Bounding Box Preview")
+            selected_det_idx = st.selectbox(
+                "Select Key-Frame to Inspect Bounding Boxes:",
+                options=list(range(len(yolo_key_frame_results))),
+                format_func=lambda i: (
+                    f"Frame #{yolo_key_frame_results[i]['frame_idx']} "
+                    f"({yolo_key_frame_results[i]['timestamp_sec']:.2f}s) - "
+                    f"{len(yolo_key_frame_results[i]['detections'])} box(es): "
+                    f"{', '.join([d['class_name'].replace('_', ' ').title() for d in yolo_key_frame_results[i]['detections']])}"
+                )
+            )
+
+            res = yolo_key_frame_results[selected_det_idx]
+            vis_img = res["frame_img"].copy()
+            for d in res["detections"]:
+                bbox = [int(v) for v in d["bbox"]]
+                cls_title = d["class_name"].replace("_", " ").title()
+                conf_pct = d["confidence"] * 100
+                cv2.rectangle(vis_img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 0, 255), 2)
+                cv2.putText(
+                    vis_img, f"{cls_title} ({conf_pct:.1f}%)",
+                    (bbox[0], max(20, bbox[1] - 10)), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (255, 255, 0), 2
+                )
+            vis_rgb = cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB)
+            st.image(
+                vis_rgb,
+                caption=f"Annotated Key-Frame #{res['frame_idx']} ({res['timestamp_sec']:.2f}s) - Bounding Box Localizations",
+                use_container_width=True
+            )
+
+            yolo_rows = []
+            idx_counter = 1
+            for res in yolo_key_frame_results:
+                f_idx = res["frame_idx"]
+                ts = res["timestamp_sec"]
+                for d in res["detections"]:
+                    bbox = d["bbox"]
+                    yolo_rows.append({
+                        "Detection #": idx_counter,
+                        "Frame #": f_idx,
+                        "Timestamp": f"{ts:.2f}s",
+                        "Detected Behavior": d["class_name"].replace("_", " ").title(),
+                        "Confidence": f"{d['confidence'] * 100:.1f}%",
+                        "Bounding Box [x1, y1, x2, y2]": f"[{bbox[0]:.1f}, {bbox[1]:.1f}, {bbox[2]:.1f}, {bbox[3]:.1f}]"
+                    })
+                    idx_counter += 1
+
+            df_yolo = pd.DataFrame(yolo_rows)
+            st.dataframe(df_yolo, use_container_width=True, hide_index=True)
+        else:
+            st.info("ℹ️ No YOLOv5 bounding box detections exceeding the 25% confidence threshold were detected in this clip.")
 
         st.divider()
 

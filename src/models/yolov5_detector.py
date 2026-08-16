@@ -38,9 +38,13 @@ class YOLOv5Detector:
         """Initializes Ultralytics YOLOv5 architecture backbone."""
         try:
             from ultralytics import YOLO
-            if self.weights_path and self.weights_path.exists():
-                self.model = YOLO(str(self.weights_path))
-                logger.info(f"Loaded YOLOv5 custom checkpoint from {self.weights_path}")
+            best_pt = WEIGHTS_DIR / "yolov5_best.pt"
+            target_pt = self.weights_path if (self.weights_path and self.weights_path.exists()) else (best_pt if best_pt.exists() else None)
+
+            if target_pt and target_pt.exists():
+                self.model = YOLO(str(target_pt))
+                self.weights_path = target_pt
+                logger.info(f"Loaded YOLOv5 custom checkpoint from {target_pt}")
             else:
                 # Load standard YOLOv5 nano/small backbone for structural initialization
                 self.model = YOLO("yolov5s.pt")
@@ -80,11 +84,17 @@ class YOLOv5Detector:
         Runs object detection on a key-frame tensor/image matrix.
         Returns list of detections: [{"class_id": int, "class_name": str, "confidence": float, "bbox": [x1,y1,x2,y2]}]
         """
-        if self.model is None:
-            # Fallback structural mock prediction for unit tests when model weights are uninitialized
+        if self.model is None or frame is None:
             return []
 
-        results = self.model(frame, verbose=False, conf=self.conf_threshold)
+        # Convert OpenCV BGR array to RGB for Ultralytics YOLO model
+        if isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.shape[2] == 3:
+            import cv2
+            input_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        else:
+            input_frame = frame
+
+        results = self.model(input_frame, verbose=False, conf=self.conf_threshold)
         detections = []
 
         for r in results:
