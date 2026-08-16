@@ -54,8 +54,9 @@ class ConsensusSegmentAlert:
 
 class SlidingWindowAggregator:
     """
-    Maintains a temporal sliding window over key-frame predictions.
-    Computes majority vote / mean probability per time window and merges contiguous alerts.
+    Maintains a temporal log over key-frame predictions.
+    Computes per-model temporal alert segments where normal or low-confidence frames break alerts,
+    and merges contiguous alerts within max_gap_sec.
     """
 
     def __init__(
@@ -73,120 +74,150 @@ class SlidingWindowAggregator:
 
     def reset(self):
         """Resets aggregator state between video sessions."""
-        self.buffer: List[FramePrediction] = []
+        self.predictions: List[FramePrediction] = []
         self.raw_window_alerts: List[FlaggedSegmentAlert] = []
 
     def add_prediction(self, prediction: FramePrediction) -> Optional[FlaggedSegmentAlert]:
         """
-        Adds a key-frame prediction and evaluates the current sliding time window.
-        Returns a FlaggedSegmentAlert if an abnormal activity threshold is exceeded.
+        Adds a key-frame prediction to the aggregator buffer.
         """
-        self.buffer.append(prediction)
+        self.predictions.append(prediction)
+        
+        # If this frame is abnormal eligible, create a single-frame candidate alert
+        is_abnormal = (prediction.predicted_class != "normal") and (prediction.confidence >= self.confidence_threshold)
+        if is_abnormal:
+            alert = FlaggedSegmentAlert(
+                start_time_sec=round(prediction.timestamp_sec, 2),
+                end_time_sec=round(prediction.timestamp_sec, 2),
+                duration_sec=0.0,
+                predicted_class=prediction.predicted_class,
+                peak_confidence=round(prediction.confidence, 4),
+                average_confidence=round(prediction.confidence, 4),
+                key_frame_count=1
+            )
+            self.raw_window_alerts.append(alert)
+            return alert
+        return None
 
-        # Evict predictions older than window_seconds relative to current timestamp
-        current_time = prediction.timestamp_sec
-        self.buffer = [
-            p for p in self.buffer
-            if (current_time - p.timestamp_sec) <= self.window_seconds
-        ]
-
-        if not self.buffer:
-            return None
-
-        # Calculate class-wise average confidence within current window
-        class_scores: Dict[str, float] = {cls: 0.0 for cls in CLASS_NAMES}
-
-        for p in self.buffer:
-            if p.probabilities:
-                for cls, prob in p.probabilities.items():
-                    if cls not in class_scores:
-                        class_scores[cls] = 0.0
-                    class_scores[cls] += prob
-            else:
-                if p.predicted_class not in class_scores:
-                    class_scores[p.predicted_class] = 0.0
-                class_scores[p.predicted_class] += p.confidence
-
-        window_size = len(self.buffer)
-        for cls in class_scores:
-            class_scores[cls] /= window_size
-
-        # Find dominant class in window
-        top_class = max(class_scores, key=class_scores.get)
-        top_confidence = class_scores[top_class]
-
-        # Ignore normal behavior class or predictions below threshold
-        if top_class == "normal" or top_confidence < self.confidence_threshold:
-            return None
-
-        start_time = self.buffer[0].timestamp_sec
-        end_time = self.buffer[-1].timestamp_sec
-        duration = max(0.0, end_time - start_time)
-        peak_conf = max(p.confidence for p in self.buffer if p.predicted_class == top_class)
-
-        alert = FlaggedSegmentAlert(
-            start_time_sec=round(start_time, 2),
-            end_time_sec=round(end_time, 2),
-            duration_sec=round(duration, 2),
-            predicted_class=top_class,
-            peak_confidence=round(peak_conf, 4),
-            average_confidence=round(top_confidence, 4),
-            key_frame_count=window_size
-        )
-
-        self.raw_window_alerts.append(alert)
-        return alert
-
-    def get_merged_alerts(self) -> List[FlaggedSegmentAlert]:
+    def get_merged_alerts(self, max_gap_sec: float = 1.0) -> List[FlaggedSegmentAlert]:
         """
-        Merges overlapping or contiguous window alerts of the same class into unified intervals.
-        Returns clean, deduplicated timeline alerts.
+        Merges contiguous or overlapping abnormal predictions of the same class into unified intervals.
+        Normal frames (predicted_class == 'normal') or low confidence frames (< confidence_threshold)
+        break alerts. If normal gap exceeds max_gap_sec, separate alerts are returned.
         """
-        if not self.raw_window_alerts:
+        if not self.predictions:
             return []
 
+        # 1. Group consecutive abnormal predictions (conf >= threshold and class != 'normal')
+        raw_runs: List[List[FramePrediction]] = []
+        current_run: List[FramePrediction] = []
+        current_class: Optional[str] = None
+
+        for p in self.predictions:
+            is_abnormal = (p.predicted_class != "normal") and (p.confidence >= self.confidence_threshold)
+
+            if is_abnormal:
+                if not current_run:
+                    current_run = [p]
+                    current_class = p.predicted_class
+                elif p.predicted_class == current_class:
+                    current_run.append(p)
+                else:
+                    raw_runs.append(current_run)
+                    current_run = [p]
+                    current_class = p.predicted_class
+            else:
+                # Normal or low-confidence frame breaks the active run
+                if current_run:
+                    raw_runs.append(current_run)
+                    current_run = []
+                    current_class = None
+
+        if current_run:
+            raw_runs.append(current_run)
+
+        if not raw_runs:
+            return []
+
+        # Convert raw runs into initial segment alerts
+        initial_alerts: List[FlaggedSegmentAlert] = []
+        for run in raw_runs:
+            start_ts = run[0].timestamp_sec
+            end_ts = run[-1].timestamp_sec
+            dur = max(0.0, end_ts - start_ts)
+            cls = run[0].predicted_class
+            peak_c = max(p.confidence for p in run)
+            avg_c = float(np.mean([p.confidence for p in run]))
+            kf_cnt = len(set(p.frame_idx for p in run))
+
+            initial_alerts.append(
+                FlaggedSegmentAlert(
+                    start_time_sec=round(start_ts, 2),
+                    end_time_sec=round(end_ts, 2),
+                    duration_sec=round(dur, 2),
+                    predicted_class=cls,
+                    peak_confidence=round(peak_c, 4),
+                    average_confidence=round(avg_c, 4),
+                    key_frame_count=kf_cnt
+                )
+            )
+
+        # 2. Merge contiguous alerts of the SAME class within max_gap_sec
         merged: List[FlaggedSegmentAlert] = []
-        current = self.raw_window_alerts[0]
+        curr = initial_alerts[0]
 
-        for next_alert in self.raw_window_alerts[1:]:
-            # If same class and overlapping/contiguous in time (within window_seconds gap)
-            if (next_alert.predicted_class == current.predicted_class and
-                next_alert.start_time_sec <= current.end_time_sec + self.window_seconds):
-                # Merge interval
-                new_start = min(current.start_time_sec, next_alert.start_time_sec)
-                new_end = max(current.end_time_sec, next_alert.end_time_sec)
-                new_duration = new_end - new_start
-                new_peak = max(current.peak_confidence, next_alert.peak_confidence)
-                new_avg = (current.average_confidence + next_alert.average_confidence) / 2.0
-                new_count = current.key_frame_count + next_alert.key_frame_count
+        def count_keyframes_in_range(t_start: float, t_end: float) -> int:
+            return len(set(p.frame_idx for p in self.predictions if t_start <= p.timestamp_sec <= t_end))
 
-                current = FlaggedSegmentAlert(
+        for nxt in initial_alerts[1:]:
+            if (nxt.predicted_class == curr.predicted_class and
+                nxt.start_time_sec <= curr.end_time_sec + max_gap_sec):
+
+                new_start = min(curr.start_time_sec, nxt.start_time_sec)
+                new_end = max(curr.end_time_sec, nxt.end_time_sec)
+                new_dur = new_end - new_start
+                new_peak = max(curr.peak_confidence, nxt.peak_confidence)
+                new_avg = (curr.average_confidence + nxt.average_confidence) / 2.0
+                new_kf_cnt = count_keyframes_in_range(new_start, new_end)
+
+                curr = FlaggedSegmentAlert(
                     start_time_sec=round(new_start, 2),
                     end_time_sec=round(new_end, 2),
-                    duration_sec=round(new_duration, 2),
-                    predicted_class=current.predicted_class,
+                    duration_sec=round(new_dur, 2),
+                    predicted_class=curr.predicted_class,
                     peak_confidence=round(new_peak, 4),
                     average_confidence=round(new_avg, 4),
-                    key_frame_count=new_count
+                    key_frame_count=new_kf_cnt
                 )
             else:
-                merged.append(current)
-                current = next_alert
+                merged.append(curr)
+                curr = nxt
 
-        merged.append(current)
+        merged.append(curr)
         return merged
 
 
 def merge_multimodel_alerts(
     model_alerts_dict: Dict[str, List[FlaggedSegmentAlert]],
-    gap_tolerance_sec: float = 3.0
+    all_predictions_map: Optional[Dict[str, List[FramePrediction]]] = None,
+    gap_tolerance_sec: float = 1.0,
+    min_agreeing_models: int = 2,
+    min_consensus_frames: int = 2
 ) -> List[ConsensusSegmentAlert]:
     """
-    Merges per-model flagged segment alerts across multiple CNN models into unified consensus alerts.
+    Computes time-aligned multi-model consensus alerts across 4 CNN models.
     
+    A consensus flag requires at least min_agreeing_models (default 2) to agree on the SAME
+    abnormal class at approximately the same timestamp with confidence >= 65%, and at least
+    min_consensus_frames (default 2) consecutive time-aligned key-frames. Single isolated
+    key-frame consensus points do NOT become timeline alerts.
+
     Args:
         model_alerts_dict: Dictionary mapping model display name -> list of FlaggedSegmentAlert.
-        gap_tolerance_sec: Time gap tolerance in seconds to merge contiguous/overlapping intervals.
+        all_predictions_map: Optional dictionary mapping model display name -> list of FramePrediction.
+        gap_tolerance_sec: Time gap tolerance in seconds to merge contiguous consensus points.
+        min_agreeing_models: Minimum number of agreeing models required for consensus (default 2).
+        min_consensus_frames: Minimum consecutive consensus key-frames required for an alert event (default 2).
 
     Returns:
         List of ConsensusSegmentAlert sorted chronologically.
@@ -194,7 +225,107 @@ def merge_multimodel_alerts(
     if not model_alerts_dict:
         return []
 
-    # Group alerts by predicted class
+    # If per-keyframe frame predictions map is available, use exact time-aligned timestamp voting
+    if all_predictions_map:
+        # Group predictions by (frame_idx, timestamp_sec)
+        ts_map: Dict[Tuple[int, float], Dict[str, FramePrediction]] = {}
+        for model_name, preds in all_predictions_map.items():
+            for p in preds:
+                key = (p.frame_idx, round(p.timestamp_sec, 2))
+                if key not in ts_map:
+                    ts_map[key] = {}
+                ts_map[key][model_name] = p
+
+        # Sort timestamp keys chronologically
+        sorted_keys = sorted(ts_map.keys(), key=lambda x: x[1])
+
+        # Evaluate consensus at each key-frame timestamp
+        consensus_points = []
+        for frame_idx, ts_sec in sorted_keys:
+            m_preds = ts_map[(frame_idx, ts_sec)]
+
+            # Group eligible predictions (conf >= 0.65 and class != "normal") by class
+            class_groups: Dict[str, List[Tuple[str, FramePrediction]]] = {}
+            for m_name, pred in m_preds.items():
+                if pred.predicted_class != "normal" and pred.confidence >= CONFIDENCE_THRESHOLD:
+                    cls = pred.predicted_class
+                    if cls not in class_groups:
+                        class_groups[cls] = []
+                    class_groups[cls].append((m_name, pred))
+
+            # Retain classes where at least min_agreeing_models agree at this timestamp
+            for cls, agreeing_pairs in class_groups.items():
+                if len(agreeing_pairs) >= min_agreeing_models:
+                    agreeing_models = [m for m, _ in agreeing_pairs]
+                    confs = [p.confidence for _, p in agreeing_pairs]
+                    consensus_points.append({
+                        "frame_idx": frame_idx,
+                        "timestamp_sec": ts_sec,
+                        "predicted_class": cls,
+                        "agreeing_models": agreeing_models,
+                        "num_agreeing": len(agreeing_models),
+                        "peak_confidence": max(confs),
+                        "avg_confidence": float(np.mean(confs))
+                    })
+
+        if not consensus_points:
+            return []
+
+        # Group consecutive time-aligned consensus points into consensus alert events
+        events: List[List[Dict[str, Any]]] = []
+        curr_event: List[Dict[str, Any]] = []
+
+        for pt in consensus_points:
+            if not curr_event:
+                curr_event = [pt]
+            else:
+                prev = curr_event[-1]
+                if (pt["predicted_class"] == prev["predicted_class"] and
+                    pt["timestamp_sec"] <= prev["timestamp_sec"] + gap_tolerance_sec):
+                    curr_event.append(pt)
+                else:
+                    events.append(curr_event)
+                    curr_event = [pt]
+
+        if curr_event:
+            events.append(curr_event)
+
+        consensus_alerts: List[ConsensusSegmentAlert] = []
+        for ev in events:
+            # Require at least min_consensus_frames (default 2) key-frames per alert event
+            if len(ev) < min_consensus_frames:
+                continue
+
+            start_t = ev[0]["timestamp_sec"]
+            end_t = ev[-1]["timestamp_sec"]
+            dur = max(0.0, end_t - start_t)
+            cls = ev[0]["predicted_class"]
+
+            agreeing_models = list(dict.fromkeys(m for pt in ev for m in pt["agreeing_models"]))
+            num_agreeing = len(agreeing_models)
+
+            peak_conf = max(pt["peak_confidence"] for pt in ev)
+            avg_conf = float(np.mean([pt["avg_confidence"] for pt in ev]))
+            kf_cnt = len(set(pt["frame_idx"] for pt in ev))
+
+            consensus_alerts.append(
+                ConsensusSegmentAlert(
+                    start_time_sec=round(start_t, 2),
+                    end_time_sec=round(end_t, 2),
+                    duration_sec=round(dur, 2),
+                    predicted_class=cls,
+                    agreeing_models=agreeing_models,
+                    num_agreeing_models=num_agreeing,
+                    peak_confidence=round(peak_conf, 4),
+                    average_confidence=round(avg_conf, 4),
+                    key_frame_count=kf_cnt
+                )
+            )
+
+        consensus_alerts.sort(key=lambda x: x.start_time_sec)
+        return consensus_alerts
+
+    # Fallback when all_predictions_map is not available: interval overlap requiring min_agreeing_models
     class_groups: Dict[str, List[Tuple[str, FlaggedSegmentAlert]]] = {}
     for model_name, alerts in model_alerts_dict.items():
         for alert in alerts:
@@ -206,11 +337,9 @@ def merge_multimodel_alerts(
     consensus_alerts: List[ConsensusSegmentAlert] = []
 
     for cls, items in class_groups.items():
-        # Sort items by start_time_sec
         items_sorted = sorted(items, key=lambda x: x[1].start_time_sec)
-
-        # Merge overlapping/contiguous intervals for this class
         merged_clusters: List[List[Tuple[str, FlaggedSegmentAlert]]] = []
+
         for model_name, alert in items_sorted:
             if not merged_clusters:
                 merged_clusters.append([(model_name, alert)])
@@ -223,16 +352,20 @@ def merge_multimodel_alerts(
                     merged_clusters.append([(model_name, alert)])
 
         for cluster in merged_clusters:
+            agreeing_models = list(dict.fromkeys(m for m, _ in cluster))
+            num_agreeing = len(agreeing_models)
+
+            # Exclude single-model predictions from consensus
+            if num_agreeing < min_agreeing_models:
+                continue
+
             start_time = min(a.start_time_sec for _, a in cluster)
             end_time = max(a.end_time_sec for _, a in cluster)
             duration = max(0.0, end_time - start_time)
 
-            agreeing_models = list(dict.fromkeys(m for m, _ in cluster))
-            num_agreeing = len(agreeing_models)
-
             peak_conf = max(a.peak_confidence for _, a in cluster)
             avg_conf = float(np.mean([a.average_confidence for _, a in cluster]))
-            total_frames = max(a.key_frame_count for _, a in cluster)
+            key_frame_count = max(a.key_frame_count for _, a in cluster)
 
             consensus_alerts.append(
                 ConsensusSegmentAlert(
@@ -244,11 +377,12 @@ def merge_multimodel_alerts(
                     num_agreeing_models=num_agreeing,
                     peak_confidence=round(peak_conf, 4),
                     average_confidence=round(avg_conf, 4),
-                    key_frame_count=total_frames
+                    key_frame_count=key_frame_count
                 )
             )
 
-    # Sort consensus alerts chronologically by start_time_sec
     consensus_alerts.sort(key=lambda x: x.start_time_sec)
     return consensus_alerts
+
+
 

@@ -38,15 +38,22 @@ class ReportGenerator:
         """
         Compiles structured session summary and exports both JSON and CSV files.
         """
-        # Calculate class-wise counts of flagged alerts
+        # Calculate class-wise counts and abnormal durations of flagged alerts
         class_wise_counts: Dict[str, int] = {cls: 0 for cls in CLASS_NAMES}
+        class_wise_duration_sec: Dict[str, float] = {cls: 0.0 for cls in CLASS_NAMES}
         total_flagged_time = 0.0
 
         for alert in alerts:
             if alert.predicted_class not in class_wise_counts:
                 class_wise_counts[alert.predicted_class] = 0
+                class_wise_duration_sec[alert.predicted_class] = 0.0
             class_wise_counts[alert.predicted_class] += 1
+            class_wise_duration_sec[alert.predicted_class] += alert.duration_sec
             total_flagged_time += alert.duration_sec
+
+        # Round class-wise durations to 2 decimal places
+        for cls in class_wise_duration_sec:
+            class_wise_duration_sec[cls] = round(class_wise_duration_sec[cls], 2)
 
         # Construct structured timeline entries
         timeline = []
@@ -84,7 +91,8 @@ class ReportGenerator:
             "summary_statistics": {
                 "total_flagged_segments": len(alerts),
                 "total_flagged_time_sec": round(total_flagged_time, 2),
-                "class_wise_counts": class_wise_counts
+                "class_wise_counts": class_wise_counts,
+                "class_wise_duration_sec": class_wise_duration_sec
             },
             "timeline": timeline
         }

@@ -3,7 +3,8 @@ Streamlit Timeline & Summary UI Component.
 Visualizes session metadata, key-frame statistics, and flagged abnormal activity timelines.
 """
 
-from typing import List, Dict, Any
+from pathlib import Path
+from typing import List, Dict, Any, Optional
 import streamlit as st
 import pandas as pd
 
@@ -59,10 +60,10 @@ def render_kpi_cards(session_meta: Dict[str, Any], summary_stats: Dict[str, Any]
 
 def render_timeline_table(timeline: List[Dict[str, Any]]):
     """Renders interactive timeline data table with formatted timestamps, model consensus, and confidence scores."""
-    st.subheader("🚩 Consensus Flagged Abnormal Activity Timeline")
+    st.subheader("🚩 Time-Aligned Multi-Model Consensus Timeline")
 
     if not timeline:
-        st.success("✅ Clean Session: No abnormal activity segments exceeding the 65% threshold were detected during this recording.")
+        st.info("ℹ️ **No consensus abnormal activity detected** (fewer than 2 of 4 CNN models agreed on any abnormal behavior class).")
         return
 
     df = pd.DataFrame(timeline)
@@ -92,29 +93,49 @@ def render_timeline_table(timeline: List[Dict[str, Any]]):
     )
 
 
-def render_class_distribution_bar(class_counts: Dict[str, int]):
-    """Renders breakdown chart of class predictions across session showing all 5 target classes."""
-    st.subheader("📊 Class-Wise Alert Distribution")
+def render_class_distribution_bar(
+    class_counts: Dict[str, int],
+    class_durations: Optional[Dict[str, float]] = None
+):
+    """Renders breakdown charts showing both Consensus Alert Count and Total Abnormal Duration per class across all 5 classes."""
+    st.subheader("📊 Class-Wise Consensus Distribution")
 
-    # Ensure all 5 target classes appear in the chart, using 0 for classes without alerts
-    full_counts = {cls: class_counts.get(cls, 0) for cls in CLASS_NAMES}
+    tab1, tab2 = st.tabs(["🔢 Consensus Alert Count", "⏱️ Abnormal Duration (s)"])
 
-    df_counts = pd.DataFrame([
-        {"Behavior Class": k.replace("_", " ").title(), "Alert Count": v}
-        for k, v in full_counts.items()
-    ])
+    with tab1:
+        full_counts = {cls: class_counts.get(cls, 0) for cls in CLASS_NAMES}
+        df_counts = pd.DataFrame([
+            {"Behavior Class": k.replace("_", " ").title(), "Alert Count": v}
+            for k, v in full_counts.items()
+        ])
+        st.bar_chart(
+            data=df_counts,
+            x="Behavior Class",
+            y="Alert Count",
+            use_container_width=True
+        )
 
-    st.bar_chart(
-        data=df_counts,
-        x="Behavior Class",
-        y="Alert Count",
-        use_container_width=True
-    )
+    with tab2:
+        dur_map = class_durations if class_durations else {}
+        full_durations = {cls: dur_map.get(cls, 0.0) for cls in CLASS_NAMES}
+        df_durations = pd.DataFrame([
+            {"Behavior Class": k.replace("_", " ").title(), "Abnormal Duration (s)": v}
+            for k, v in full_durations.items()
+        ])
+        st.bar_chart(
+            data=df_durations,
+            x="Behavior Class",
+            y="Abnormal Duration (s)",
+            use_container_width=True
+        )
 
 
-def render_model_comparison_section(per_model_reports: Dict[str, Dict[str, Any]]):
-    """Renders model-wise comparison table and bar chart showing detections per model."""
-    st.subheader("🤖 Benchmark Model-Wise Detections Comparison")
+def render_model_comparison_section(
+    per_model_reports: Dict[str, Dict[str, Any]],
+    yolo_status: Optional[Dict[str, Any]] = None
+):
+    """Renders model-wise comparison table and bar chart showing detections per model and YOLOv5 branch status."""
+    st.subheader("🤖 Benchmark Model-Wise Detections & Branch Comparison")
 
     comparison_rows = []
     for model_name, report in per_model_reports.items():
@@ -124,19 +145,42 @@ def render_model_comparison_section(per_model_reports: Dict[str, Dict[str, Any]]
         top_cls = max(counts, key=counts.get) if counts and max(counts.values()) > 0 else "None"
 
         comparison_rows.append({
-            "Model Name": model_name.replace("_", " ").title(),
-            "Total Flagged Segments": total_alerts,
+            "Benchmark Model / Branch": model_name.replace("_", " ").title(),
+            "Branch Architecture": "5-Class Classification",
+            "Checkpoint Status": "Trained Checkpoint Active",
+            "Flagged Segments": total_alerts,
             "Primary Detected Class": top_cls.replace("_", " ").title() if top_cls != "None" else "Clean",
-            "Total Flagged Time": f"{stats.get('total_flagged_time_sec', 0.0):.1f}s"
+            "Flagged Time": f"{stats.get('total_flagged_time_sec', 0.0):.1f}s"
         })
+
+    # Add YOLOv5 Object Detection Branch Status Row
+    yolo_ckpt = Path("weights") / "yolov5_best.pt"
+    yolo_status_str = "Trained Checkpoint Active" if yolo_ckpt.exists() else "Untrained / Checkpoint Unavailable"
+    yolo_alerts = yolo_status.get("total_flagged_segments", 0) if (yolo_status and yolo_ckpt.exists()) else 0
+
+    comparison_rows.append({
+        "Benchmark Model / Branch": "YOLOv5 (Object Detection)",
+        "Branch Architecture": "Bounding Box Localization",
+        "Checkpoint Status": yolo_status_str,
+        "Flagged Segments": yolo_alerts if yolo_ckpt.exists() else 0,
+        "Primary Detected Class": "Bounding Boxes" if yolo_ckpt.exists() else "N/A (Ready for Training)",
+        "Flagged Time": f"{yolo_status.get('total_flagged_time_sec', 0.0):.1f}s" if (yolo_status and yolo_ckpt.exists()) else "N/A"
+    })
 
     df_comp = pd.DataFrame(comparison_rows)
     st.dataframe(df_comp, use_container_width=True, hide_index=True)
 
     # Bar chart comparing detected alerts per model
     df_chart = pd.DataFrame([
-        {"Model Name": row["Model Name"], "Flagged Segments": row["Total Flagged Segments"]}
+        {"Model Name": row["Benchmark Model / Branch"], "Flagged Segments": row["Flagged Segments"]}
         for row in comparison_rows
     ])
     st.bar_chart(df_chart, x="Model Name", y="Flagged Segments", use_container_width=True)
+
+    if not yolo_ckpt.exists():
+        st.info(
+            "ℹ️ **YOLOv5 Branch Note**: Trained weights `weights/yolov5_best.pt` for the project's 5 behavior classes are currently unavailable. "
+            "The YOLOv5 object detection branch, custom dataset configuration (`data/yolov5/data.yaml`), and `YOLOv5Detector` class remain "
+            "fully preserved in the codebase for future dataset fine-tuning."
+        )
 

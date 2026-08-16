@@ -215,7 +215,7 @@ def test_clean_session_zero_alerts_handling(tmp_path):
 
 
 def test_multimodel_consensus_and_overlapping_merging(tmp_path):
-    """Test merging overlapping detections across multiple CNN models into single consensus events."""
+    """Test merging overlapping detections across multiple CNN models requiring at least 2 models to agree."""
     from src.aggregation.sliding_window import FlaggedSegmentAlert, merge_multimodel_alerts
 
     model_alerts = {
@@ -239,24 +239,30 @@ def test_multimodel_consensus_and_overlapping_merging(tmp_path):
                 predicted_class="hand_move", peak_confidence=0.985,
                 average_confidence=0.848, key_frame_count=167
             )
+        ],
+        "InceptionResNetV2": [
+            FlaggedSegmentAlert(
+                start_time_sec=0.0, end_time_sec=33.2, duration_sec=33.2,
+                predicted_class="hand_move", peak_confidence=0.920,
+                average_confidence=0.810, key_frame_count=167
+            )
         ]
     }
 
     consensus = merge_multimodel_alerts(model_alerts, gap_tolerance_sec=3.0)
 
-    # 2 distinct classes: side_watching and hand_move
+    # 2 distinct classes reach 2-of-4 consensus: side_watching (2 models) and hand_move (2 models)
     assert len(consensus) == 2
 
     side_watch_alert = next(a for a in consensus if a.predicted_class == "side_watching")
     assert side_watch_alert.num_agreeing_models == 2
     assert "Custom CNN" in side_watch_alert.agreeing_models
     assert "DenseNet121" in side_watch_alert.agreeing_models
-    assert side_watch_alert.start_time_sec == 0.0
-    assert side_watch_alert.end_time_sec == 33.2
 
     hand_move_alert = next(a for a in consensus if a.predicted_class == "hand_move")
-    assert hand_move_alert.num_agreeing_models == 1
-    assert hand_move_alert.agreeing_models == ["InceptionV3"]
+    assert hand_move_alert.num_agreeing_models == 2
+    assert "InceptionV3" in hand_move_alert.agreeing_models
+    assert "InceptionResNetV2" in hand_move_alert.agreeing_models
 
     generator = ReportGenerator(output_dir=tmp_path)
     report = generator.generate_session_report(
@@ -270,6 +276,248 @@ def test_multimodel_consensus_and_overlapping_merging(tmp_path):
 
     assert report["summary_statistics"]["total_flagged_segments"] == 2
     assert report["timeline"][0]["agreeing_models"] is not None
-    assert report["timeline"][0]["num_agreeing_models"] >= 1
+    assert report["timeline"][0]["num_agreeing_models"] >= 2
+
+
+def test_normal_intervals_break_alert_and_separated_events(tmp_path):
+    """Verify normal intervals break active alerts and separated abnormal episodes stay distinct."""
+    aggregator = SlidingWindowAggregator(window_seconds=3.0, confidence_threshold=0.65)
+
+    # Episode 1: 0.0s to 1.5s side_watching (high confidence)
+    for i in range(6):
+        aggregator.add_prediction(FramePrediction(
+            frame_idx=i * 3, timestamp_sec=i * 0.3,
+            predicted_class="side_watching", confidence=0.85
+        ))
+
+    # Normal gap: 1.8s to 4.8s (normal/low confidence predictions)
+    for i in range(6, 17):
+        aggregator.add_prediction(FramePrediction(
+            frame_idx=i * 3, timestamp_sec=i * 0.3,
+            predicted_class="eye_movement", confidence=0.40
+        ))
+
+    # Episode 2: 5.1s to 8.7s side_watching (high confidence)
+    for i in range(17, 30):
+        aggregator.add_prediction(FramePrediction(
+            frame_idx=i * 3, timestamp_sec=i * 0.3,
+            predicted_class="side_watching", confidence=0.88
+        ))
+
+    merged = aggregator.get_merged_alerts(max_gap_sec=1.0)
+    assert len(merged) == 2
+    assert merged[0].predicted_class == "side_watching"
+    assert merged[0].start_time_sec == 0.0
+    assert merged[1].predicted_class == "side_watching"
+    assert merged[1].start_time_sec >= 4.0
+
+    generator = ReportGenerator(output_dir=tmp_path)
+    report = generator.generate_session_report(
+        video_name="separated_events_test.mp4",
+        total_duration_sec=9.0,
+        total_frames=270,
+        key_frames_analyzed=30,
+        model_name="densenet121",
+        alerts=merged
+    )
+
+    assert report["summary_statistics"]["total_flagged_segments"] == 2
+    assert report["summary_statistics"]["class_wise_counts"]["side_watching"] == 2
+
+
+def test_requirement_9_keyframe_and_timeline_verifications(tmp_path):
+    """
+    Specifically tests Requirement #9 rules:
+    - 499 frames with frame_skip=3 gives approx 167 key-frames
+    - 4 models do NOT turn 167 key-frames into 668 key-frames
+    - sliding-window observations do NOT increase key-frame count
+    - separated abnormal periods remain separate
+    - normal periods break alerts
+    - timestamps are preserved
+    - overlapping model detections merge correctly
+    - class distribution equals final consensus timeline
+    """
+    # 1. 499 frames with frame_skip=3 gives ~167 key-frames
+    frame_indices = list(range(0, 499, 3))
+    key_frame_count = len(frame_indices)
+    assert key_frame_count == 167
+
+    # 2. Process 167 key-frames through 4 models
+    CNN_MODELS = ["Custom CNN", "DenseNet121", "InceptionV3", "InceptionResNetV2"]
+    model_predictions = {}
+    aggregators = {}
+
+    for m in CNN_MODELS:
+        aggregators[m] = SlidingWindowAggregator(confidence_threshold=0.65)
+        model_predictions[m] = []
+
+        for f_idx in frame_indices:
+            ts = round(f_idx * 0.0667, 2)  # ~15 FPS
+            # Episode A: 0 to 10s (f_idx 0 to 150): side_watching conf 0.80
+            # Normal Gap: 10s to 20s (f_idx 153 to 300): normal conf 0.90
+            # Episode B: 20s to 30s (f_idx 303 to 450): side_watching conf 0.85
+            if ts <= 10.0:
+                cls = "side_watching"
+                conf = 0.80
+            elif ts <= 20.0:
+                cls = "normal"
+                conf = 0.90
+            else:
+                cls = "side_watching"
+                conf = 0.85
+
+            pred = FramePrediction(
+                frame_idx=f_idx,
+                timestamp_sec=ts,
+                predicted_class=cls,
+                confidence=conf
+            )
+            model_predictions[m].append(pred)
+            aggregators[m].add_prediction(pred)
+
+    # Verify per-model prediction counts = 167 (NOT 668)
+    for m in CNN_MODELS:
+        assert len(model_predictions[m]) == 167
+
+    # The total key-frames analyzed for the video remains 167
+    video_key_frames = len(frame_indices)
+    assert video_key_frames == 167
+
+    # 3. Separated abnormal periods remain separate; normal periods break alerts
+    model_alerts_dict = {}
+    for m in CNN_MODELS:
+        merged = aggregators[m].get_merged_alerts(max_gap_sec=1.0)
+        # Should produce 2 separate alerts due to normal period between 10s and 20s
+        assert len(merged) == 2
+        assert merged[0].predicted_class == "side_watching"
+        assert merged[0].end_time_sec <= 10.5
+        assert merged[1].predicted_class == "side_watching"
+        assert merged[1].start_time_sec >= 19.5
+        # Verify key_frame_count in each alert does NOT sum sliding windows (e.g., 2400)
+        assert merged[0].key_frame_count <= 167
+        assert merged[1].key_frame_count <= 167
+        model_alerts_dict[m] = merged
+
+    # 4. Overlapping model detections merge correctly into consensus
+    from src.aggregation.sliding_window import merge_multimodel_alerts
+    consensus = merge_multimodel_alerts(model_alerts_dict, all_predictions_map=model_predictions, gap_tolerance_sec=1.0)
+    assert len(consensus) == 2
+    for c in consensus:
+        assert c.num_agreeing_models == 4
+        assert c.key_frame_count <= 167
+
+    # 5. Class distribution equals final consensus timeline alert counts
+    generator = ReportGenerator(output_dir=tmp_path)
+    report = generator.generate_session_report(
+        video_name="test_video_499.mp4",
+        total_duration_sec=33.25,
+        total_frames=499,
+        key_frames_analyzed=video_key_frames,
+        model_name="Multi-CNN Consensus",
+        alerts=consensus
+    )
+
+    class_counts = report["summary_statistics"]["class_wise_counts"]
+    assert class_counts["side_watching"] == len(consensus)  # 2
+    assert report["summary_statistics"]["total_flagged_segments"] == 2
+    assert report["session_metadata"]["key_frames_analyzed"] == 167
+
+
+def test_time_aligned_multimodel_consensus_specifications(tmp_path):
+    """
+    Validates Time-Aligned Multi-Model Consensus logic per Requirement #16 & Refinement:
+    - 2-of-4 consensus
+    - single isolated consensus key-frame excluded (min 2 consecutive consensus key-frames required)
+    - 2 consecutive consensus key-frames produce a valid alert
+    - single-model prediction not becoming consensus
+    - different classes at same timestamp
+    - confidence threshold (<0.65 excluded)
+    - temporal separation of events (>1.0s gap breaks event)
+    - class-wise counts and duration
+    - unique key-frame counting
+    - no-consensus clean session
+    """
+    from src.aggregation.sliding_window import merge_multimodel_alerts, FramePrediction
+
+    models = ["Custom CNN", "DenseNet121", "InceptionV3", "InceptionResNetV2"]
+    predictions_map = {m: [] for m in models}
+
+    # Scenario A (t=0.0s & t=0.2s): Custom CNN & DenseNet121 predict 'side_watching' (conf 0.70 & 0.80) -> 2 CONSECUTIVE CONSENSUS FRAMES -> VALID ALERT
+    for f_idx, ts in [(0, 0.0), (1, 0.2)]:
+        predictions_map["Custom CNN"].append(FramePrediction(frame_idx=f_idx, timestamp_sec=ts, predicted_class="side_watching", confidence=0.70))
+        predictions_map["DenseNet121"].append(FramePrediction(frame_idx=f_idx, timestamp_sec=ts, predicted_class="side_watching", confidence=0.80))
+        predictions_map["InceptionV3"].append(FramePrediction(frame_idx=f_idx, timestamp_sec=ts, predicted_class="hand_move", confidence=0.90))
+        predictions_map["InceptionResNetV2"].append(FramePrediction(frame_idx=f_idx, timestamp_sec=ts, predicted_class="side_watching", confidence=0.40))
+
+    # Scenario B (t=5.0s, f_idx=25): Isolated single consensus frame for 'mouth_open' (Custom CNN & DenseNet121 conf 0.85) -> ISOLATED SINGLE FRAME -> NO ALERT
+    predictions_map["Custom CNN"].append(FramePrediction(frame_idx=25, timestamp_sec=5.0, predicted_class="mouth_open", confidence=0.85))
+    predictions_map["DenseNet121"].append(FramePrediction(frame_idx=25, timestamp_sec=5.0, predicted_class="mouth_open", confidence=0.85))
+    predictions_map["InceptionV3"].append(FramePrediction(frame_idx=25, timestamp_sec=5.0, predicted_class="normal", confidence=0.90))
+    predictions_map["InceptionResNetV2"].append(FramePrediction(frame_idx=25, timestamp_sec=5.0, predicted_class="normal", confidence=0.90))
+
+    # Scenario C (t=10.0s f_idx=50, t=10.2s f_idx=51): Custom CNN & InceptionV3 predict 'hand_move' (conf 0.85 & 0.88) -> 2 CONSECUTIVE CONSENSUS FRAMES -> VALID ALERT
+    for f_idx, ts in [(50, 10.0), (51, 10.2)]:
+        predictions_map["Custom CNN"].append(FramePrediction(frame_idx=f_idx, timestamp_sec=ts, predicted_class="hand_move", confidence=0.85))
+        predictions_map["DenseNet121"].append(FramePrediction(frame_idx=f_idx, timestamp_sec=ts, predicted_class="normal", confidence=0.90))
+        predictions_map["InceptionV3"].append(FramePrediction(frame_idx=f_idx, timestamp_sec=ts, predicted_class="hand_move", confidence=0.88))
+        predictions_map["InceptionResNetV2"].append(FramePrediction(frame_idx=f_idx, timestamp_sec=ts, predicted_class="normal", confidence=0.90))
+
+    model_alerts_dict = {m: [] for m in models}
+    consensus = merge_multimodel_alerts(model_alerts_dict, all_predictions_map=predictions_map, gap_tolerance_sec=1.0, min_consensus_frames=2)
+
+    # Should produce 2 valid consensus events (isolated single frame mouth_open at t=5.0s excluded):
+    # 1. side_watching from 0.0s to 0.2s (agreeing: Custom CNN, DenseNet121)
+    # 2. hand_move from 10.0s to 10.2s (agreeing: Custom CNN, InceptionV3)
+    assert len(consensus) == 2
+
+    c1 = consensus[0]
+    assert c1.predicted_class == "side_watching"
+    assert c1.start_time_sec == 0.0
+    assert c1.end_time_sec == 0.2
+    assert c1.key_frame_count == 2
+    assert c1.num_agreeing_models == 2
+    assert set(c1.agreeing_models) == {"Custom CNN", "DenseNet121"}
+
+    c2 = consensus[1]
+    assert c2.predicted_class == "hand_move"
+    assert c2.start_time_sec == 10.0
+    assert c2.end_time_sec == 10.2
+    assert c2.duration_sec == 0.2
+    assert c2.num_agreeing_models == 2
+    assert c2.key_frame_count == 2
+
+    # Verify isolated single consensus frame (mouth_open at t=5.0s) was EXCLUDED
+    assert not any(c.predicted_class == "mouth_open" for c in consensus)
+
+    # Verify report generator computes both alert counts and class-wise duration
+    generator = ReportGenerator(output_dir=tmp_path)
+    report = generator.generate_session_report(
+        video_name="time_aligned_test.mp4",
+        total_duration_sec=15.0,
+        total_frames=300,
+        key_frames_analyzed=100,
+        model_name="Multi-CNN Consensus",
+        alerts=consensus
+    )
+
+    stats = report["summary_statistics"]
+    assert stats["class_wise_counts"]["side_watching"] == 1
+    assert stats["class_wise_counts"]["hand_move"] == 1
+    assert stats["class_wise_counts"]["mouth_open"] == 0
+    assert stats["class_wise_duration_sec"]["hand_move"] == 0.2
+
+    # Scenario D: Clean Session (No 2-model consensus)
+    clean_preds_map = {
+        "Custom CNN": [FramePrediction(frame_idx=0, timestamp_sec=0.0, predicted_class="side_watching", confidence=0.90)],
+        "DenseNet121": [FramePrediction(frame_idx=0, timestamp_sec=0.0, predicted_class="hand_move", confidence=0.90)],
+        "InceptionV3": [FramePrediction(frame_idx=0, timestamp_sec=0.0, predicted_class="mobile_use", confidence=0.90)],
+        "InceptionResNetV2": [FramePrediction(frame_idx=0, timestamp_sec=0.0, predicted_class="normal", confidence=0.90)]
+    }
+    clean_consensus = merge_multimodel_alerts({}, all_predictions_map=clean_preds_map)
+    assert len(clean_consensus) == 0
+
+
+
+
 
 

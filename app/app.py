@@ -63,7 +63,7 @@ def main():
     # --- SIDEBAR CONFIGURATION ---
     st.sidebar.header("⚙️ Pipeline Configuration")
 
-    st.sidebar.subheader("🤖 Active Ensemble Classifier Models (4)")
+    st.sidebar.subheader("🤖 Active Ensemble Classifier Models (4 CNNs)")
     for m_name in CNN_BENCHMARK_MODELS:
         ckpt_path = Path("weights") / f"{m_name}_best.pt"
         display_title = m_name.replace('_', ' ').title()
@@ -71,6 +71,13 @@ def main():
             st.sidebar.success(f"✅ {display_title}: `{ckpt_path.name}` Loaded")
         else:
             st.sidebar.warning(f"⚠️ {display_title}: Base Weights (No Checkpoint)")
+
+    st.sidebar.subheader("🎯 Object Detection & Localization Branch")
+    yolo_ckpt = Path("weights") / "yolov5_best.pt"
+    if yolo_ckpt.exists():
+        st.sidebar.success("✅ YOLOv5 Detector: `yolov5_best.pt` Loaded")
+    else:
+        st.sidebar.info("ℹ️ YOLOv5 Detector: Trained Checkpoint Unavailable (Branch Ready for Fine-Tuning)")
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("📐 Methodology Parameters")
@@ -244,7 +251,11 @@ def run_proctoring_pipeline(video_path: Path):
             )
 
         # Merge overlapping/contiguous detections across models into consensus alerts
-        consensus_alerts = merge_multimodel_alerts(model_alerts_dict)
+        all_predictions_map = {
+            m_name.replace("_", " ").title(): aggregators[m_name].predictions
+            for m_name in CNN_BENCHMARK_MODELS
+        }
+        consensus_alerts = merge_multimodel_alerts(model_alerts_dict, all_predictions_map=all_predictions_map)
 
         consensus_report = report_gen.generate_session_report(
             video_name=video_path.name,
@@ -272,7 +283,10 @@ def run_proctoring_pipeline(video_path: Path):
         with col_a:
             render_timeline_table(consensus_report["timeline"])
         with col_b:
-            render_class_distribution_bar(consensus_report["summary_statistics"]["class_wise_counts"])
+            render_class_distribution_bar(
+                class_counts=consensus_report["summary_statistics"]["class_wise_counts"],
+                class_durations=consensus_report["summary_statistics"].get("class_wise_duration_sec")
+            )
 
         st.divider()
 
