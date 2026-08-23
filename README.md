@@ -2,6 +2,9 @@
 
 An AI-Based Online Exam Proctoring System reproducing the research methodology by **Ramzan et al. (IEEE Access, 2024)** as specified in `project_report.pdf`.
 
+## 🚀 Live Demo
+
+[🌐 Open AI Guardian Sentinel](https://ai-online-exam-proctoring-tcyy6www4fbycycqz9l2p7.streamlit.app/)
 ---
 
 ## 📌 Project Overview
