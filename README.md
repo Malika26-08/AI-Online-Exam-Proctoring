@@ -4,7 +4,7 @@ An AI-Based Online Exam Proctoring System reproducing the research methodology b
 
 ## 🚀 Live Demo
 
-[🌐 Open AI Guardian Sentinel](https://ai-online-exam-proctoring-tcyy6www4fbycycqz9l2p7.streamlit.app/)
+[🌐 Open AI Guardian](https://ai-online-exam-proctoring.streamlit.app/)
 ---
 
 ## 📌 Project Overview
