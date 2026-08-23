@@ -4,7 +4,7 @@ Applies Gaussian noise filtering, histogram equalization/contrast normalization,
 As specified in project_report.pdf (Ramzan et al., 2024).
 """
 
-from typing import Tuple
+from typing import Tuple, Optional, Union, Dict, Any
 import cv2
 import numpy as np
 from src.config import DEFAULT_IMAGE_SIZE
@@ -21,9 +21,13 @@ class FramePreprocessor:
         target_size: Tuple[int, int] = DEFAULT_IMAGE_SIZE,
         gaussian_kernel: Tuple[int, int] = (5, 5),
         gaussian_sigma: float = 1.0,
-        enable_histogram_eq: bool = True
+        enable_histogram_eq: bool = True,
+        output_size: Optional[Tuple[int, int]] = None
     ):
+        if output_size is not None:
+            target_size = output_size
         self.target_size = target_size
+        self.output_size = target_size
         self.gaussian_kernel = gaussian_kernel
         self.gaussian_sigma = gaussian_sigma
         self.enable_histogram_eq = enable_histogram_eq
@@ -58,19 +62,46 @@ class FramePreprocessor:
         if frame is None or frame.size == 0:
             raise ValueError("Invalid empty frame passed to resize.")
 
-        size = target_size if target_size is not None else self.target_size
-        return cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+        t_size = target_size if target_size is not None else self.target_size
+        return cv2.resize(frame, t_size, interpolation=cv2.INTER_AREA)
 
-    def preprocess(self, frame: np.ndarray, target_size: Tuple[int, int] = None) -> np.ndarray:
+    def preprocess(
+        self,
+        frame: np.ndarray,
+        target_size: Optional[Tuple[int, int]] = None,
+        return_dict: bool = False
+    ) -> Union[np.ndarray, Dict[str, Any]]:
         """
         Executes complete pre-processing sequence:
-        Raw Frame -> Gaussian Noise Filtering -> Histogram Normalization -> Resizing.
-        """
-        denoised = self.apply_gaussian_filter(frame)
-        if self.enable_histogram_eq:
-            normalized = self.apply_histogram_equalization(denoised)
-        else:
-            normalized = denoised
+        1. Gaussian Filtering
+        2. Histogram Equalization (Contrast Normalization)
+        3. Spatial Resizing
+        4. Min-Max Intensity Normalization [0, 1] (in dict mode)
 
-        final_frame = self.resize(normalized, target_size=target_size)
-        return final_frame
+        By default returns resized np.ndarray (shape HxWxC, uint8) to satisfy unit tests and dataloaders.
+        If return_dict=True, returns dictionary containing intermediate arrays and normalized tensor.
+        """
+        if frame is None or frame.size == 0:
+            raise ValueError("Invalid empty frame passed to preprocess.")
+
+        t_size = target_size if target_size is not None else self.target_size
+
+        filtered = self.apply_gaussian_filter(frame)
+        if self.enable_histogram_eq:
+            equalized = self.apply_histogram_equalization(filtered)
+        else:
+            equalized = filtered
+
+        resized = self.resize(equalized, target_size=t_size)
+
+        if return_dict:
+            normalized = resized.astype(np.float32) / 255.0
+            return {
+                "raw_image": frame,
+                "filtered_image": filtered,
+                "equalized_image": equalized,
+                "resized_image": resized,
+                "normalized_image": normalized
+            }
+
+        return resized

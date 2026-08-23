@@ -20,12 +20,36 @@ class VideoValidationError(Exception):
     pass
 
 
+class VideoProperties:
+    """Read-only property container wrapper for VideoLoader properties."""
+
+    def __init__(self, metadata: Dict[str, Any]):
+        self.total_frames = metadata.get("frame_count", 0)
+        self.fps = metadata.get("fps", 30.0)
+        self.width = metadata.get("width", 0)
+        self.height = metadata.get("height", 0)
+        self.duration_sec = metadata.get("duration_sec", 0.0)
+
+    def __getitem__(self, item: str) -> Any:
+        mapping = {
+            "total_frames": self.total_frames,
+            "frame_count": self.total_frames,
+            "fps": self.fps,
+            "width": self.width,
+            "height": self.height,
+            "duration_sec": self.duration_sec
+        }
+        return mapping[item]
+
+
 class VideoLoader:
     """Wraps OpenCV VideoCapture to validate videos and yield frames with frame-skip logic."""
 
-    def __init__(self, video_path: Path):
+    def __init__(self, video_path: Path, frame_skip: int = FRAME_SKIP):
         self.video_path = Path(video_path)
+        self.frame_skip = frame_skip
         self.metadata = self.validate_and_get_info()
+        self.properties = VideoProperties(self.metadata)
 
     def validate_and_get_info(self) -> Dict[str, Any]:
         """Validates video container format, file existence, and readable frames."""
@@ -82,11 +106,12 @@ class VideoLoader:
         )
         return info
 
-    def read_frames(self, frame_skip: int = FRAME_SKIP) -> Generator[Tuple[int, float, np.ndarray], None, None]:
+    def read_frames(self, frame_skip: Optional[int] = None) -> Generator[Tuple[int, float, np.ndarray], None, None]:
         """
         Yields (frame_index, timestamp_seconds, frame_bgr) for every `frame_skip`-th frame.
         Guarantees exact frame-level index tracking.
         """
+        effective_skip = frame_skip if frame_skip is not None else self.frame_skip
         cap = cv2.VideoCapture(str(self.video_path))
         if not cap.isOpened():
             raise VideoValidationError(f"Cannot open video for reading: {self.video_path}")
@@ -101,7 +126,7 @@ class VideoLoader:
                 if not ret or frame is None:
                     break
 
-                if frame_idx % frame_skip == 0:
+                if frame_idx % effective_skip == 0:
                     timestamp = frame_idx / fps
                     yield (frame_idx, timestamp, frame)
 

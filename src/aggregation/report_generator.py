@@ -38,7 +38,6 @@ class ReportGenerator:
         """
         Compiles structured session summary and exports both JSON and CSV files.
         """
-        # Calculate class-wise counts and abnormal durations of flagged alerts
         class_wise_counts: Dict[str, int] = {cls: 0 for cls in CLASS_NAMES}
         class_wise_duration_sec: Dict[str, float] = {cls: 0.0 for cls in CLASS_NAMES}
         total_flagged_time = 0.0
@@ -51,11 +50,9 @@ class ReportGenerator:
             class_wise_duration_sec[alert.predicted_class] += alert.duration_sec
             total_flagged_time += alert.duration_sec
 
-        # Round class-wise durations to 2 decimal places
         for cls in class_wise_duration_sec:
             class_wise_duration_sec[cls] = round(class_wise_duration_sec[cls], 2)
 
-        # Construct structured timeline entries
         timeline = []
         for idx, alert in enumerate(alerts, start=1):
             entry = {
@@ -109,6 +106,28 @@ class ReportGenerator:
         logger.info(f"Saved session CSV report to {csv_path}")
 
         return report_data
+
+    def export_all_formats(
+        self,
+        consensus_report: Dict[str, Any],
+        per_model_reports: Optional[Dict[str, Any]] = None,
+        json_filename: str = "consensus_session_report.json",
+        csv_filename: str = "consensus_session_report.csv"
+    ) -> Dict[str, Any]:
+        """
+        Exports both JSON and CSV files for the consensus report session.
+        """
+        json_path = self.output_dir / json_filename
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(consensus_report, f, indent=2)
+        logger.info(f"Saved consensus JSON report to {json_path}")
+
+        csv_path = self.output_dir / csv_filename
+        timeline = consensus_report.get("timeline", [])
+        self._export_csv(timeline, csv_path)
+        logger.info(f"Saved consensus CSV report to {csv_path}")
+
+        return consensus_report
 
     @staticmethod
     def _format_timestamp(seconds: float) -> str:

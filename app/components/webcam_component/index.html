@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  background:#0e1117;color:#e6edf3;padding:10px;overflow-x:hidden;
+}
+.card{
+  background:#161b22;border:1px solid #30363d;border-radius:10px;
+  padding:14px;max-width:660px;margin:0 auto;
+}
+.title{
+  font-size:13px;font-weight:700;color:#8b949e;text-transform:uppercase;
+  letter-spacing:.6px;margin-bottom:10px;
+}
+.video-wrap{
+  position:relative;width:100%;height:290px;background:#0d1117;
+  border-radius:8px;border:2px solid #30363d;overflow:hidden;
+  display:flex;align-items:center;justify-content:center;
+}
+video{width:100%;height:100%;object-fit:cover;display:none;}
+.placeholder{
+  display:flex;flex-direction:column;align-items:center;gap:8px;
+  color:#484f58;font-size:13px;text-align:center;
+}
+.placeholder-icon{font-size:40px;opacity:.35;}
+.badge{
+  position:absolute;top:8px;left:8px;
+  background:rgba(13,17,23,.88);padding:4px 12px;border-radius:20px;
+  font-size:12px;font-weight:700;display:none;align-items:center;gap:6px;
+  border:1px solid rgba(255,255,255,.12);
+}
+.dot{width:9px;height:9px;border-radius:50%;background:#3fb950;flex-shrink:0;}
+.pulse{animation:blink .8s infinite alternate;}
+@keyframes blink{from{opacity:1}to{opacity:.1}}
+.screen-pill{
+  position:absolute;top:8px;right:8px;
+  background:rgba(56,139,253,.15);border:1px solid #388bfd;
+  color:#58a6ff;border-radius:12px;padding:3px 10px;font-size:11px;
+  font-weight:600;display:none;
+}
+.screen-warn{
+  position:absolute;bottom:8px;right:8px;
+  background:rgba(218,54,51,.2);border:1px solid #da3633;
+  color:#f85149;border-radius:12px;padding:4px 12px;font-size:11px;
+  font-weight:700;display:none;
+}
+.controls{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
+button{
+  padding:9px 20px;border:none;border-radius:6px;font-size:13px;
+  font-weight:600;cursor:pointer;display:inline-flex;align-items:center;
+  gap:6px;transition:opacity .15s;
+}
+button:disabled{opacity:.35;cursor:not-allowed;}
+#btnStart{background:#238636;color:#fff;}
+#btnStart:not(:disabled):hover{background:#2ea043;}
+#btnStop{background:#da3633;color:#fff;display:none;}
+#btnStop:not(:disabled):hover{background:#f85149;}
+#btnReset{background:#21262d;color:#c9d1d9;border:1px solid #30363d;display:none;}
+#btnReset:hover{background:#30363d;}
+.status{
+  margin-top:9px;padding:8px 12px;border-radius:6px;font-size:12px;
+  text-align:center;background:rgba(210,153,34,.08);
+  border:1px solid #d29922;color:#e3b341;
+}
+.status.ready{background:rgba(35,134,54,.08);border-color:#238636;color:#3fb950;}
+.status.recording{background:rgba(218,54,51,.08);border-color:#da3633;color:#f85149;}
+.status.done{background:rgba(35,134,54,.08);border-color:#238636;color:#3fb950;}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="title">Proctored Exam Video &amp; Screen Recorder</div>
+  <div class="video-wrap" id="videoWrap">
+    <div class="placeholder" id="placeholder">
+      <div class="placeholder-icon">&#127909;</div>
+      <div>Webcam preview appears here</div>
+      <div style="font-size:11px;color:#30363d">Click Start Exam Recording below</div>
+    </div>
+    <video id="vLive" autoplay muted playsinline></video>
+    <video id="vDone" controls></video>
+    <div class="badge" id="badge">
+      <span class="dot" id="dot"></span>
+      <span id="badgeTxt">Ready</span>
+    </div>
+    <div class="screen-pill" id="screenPill">&#128250; Screen active</div>
+    <div class="screen-warn" id="screenWarn">&#9888; Screen sharing interrupted</div>
+  </div>
+  <div class="controls">
+    <button id="btnStart" disabled>&#9654; Start Exam Recording</button>
+    <button id="btnStop">&#9632; End Exam &amp; Stop Recording</button>
+    <button id="btnReset">&#8635; Record Again</button>
+  </div>
+  <div class="status" id="status">Initialising camera&hellip;</div>
+</div>
+
+<script>
+"use strict";
+// ─── Streamlit postMessage bridge ─────────────────────────────────────────
+(function(){
+  function send(type, extra){
+    var msg = { isStreamlitMessage: true, type: type };
+    if(extra) Object.assign(msg, extra);
+    window.parent.postMessage(msg, "*");
+  }
+  window.Streamlit = {
+    setComponentReady: function(){ send("streamlit:componentReady", {apiVersion:1}); },
+    setFrameHeight:    function(h){ send("streamlit:setFrameHeight", {height:h}); },
+    setComponentValue: function(v){ send("streamlit:setComponentValue", {value:v, dataType:"json"}); },
+    events:{ _h:{},
+      addEventListener: function(name, fn){ this._h[name]=fn; }
+    }
+  };
+  window.addEventListener("message", function(ev){
+    if(!ev.data||!ev.data.type) return;
+    if(ev.data.type==="streamlit:render"){
+      var fn=window.Streamlit.events._h["streamlit:render"];
+      if(fn) fn(ev);
+    }
+  });
+})();
+
+window.Streamlit.setComponentReady();
+window.Streamlit.setFrameHeight(440);
+
+// ─── App state ───────────────────────────────────────────────────────────
+var vLive      = document.getElementById("vLive");
+var vDone      = document.getElementById("vDone");
+var placeholder= document.getElementById("placeholder");
+var btnStart   = document.getElementById("btnStart");
+var btnStop    = document.getElementById("btnStop");
+var btnReset   = document.getElementById("btnReset");
+var statusEl   = document.getElementById("status");
+var badge      = document.getElementById("badge");
+var dot        = document.getElementById("dot");
+var badgeTxt   = document.getElementById("badgeTxt");
+var screenPill = document.getElementById("screenPill");
+var screenWarn = document.getElementById("screenWarn");
+
+var camStream  = null;
+var scrStream  = null;
+var webRecorder= null;
+var scrRecorder= null;
+var chunks     = [];
+var scrChunks  = [];
+var screenEvents = [];
+var screenStatus = "Completed";
+var tickId     = null;
+var elapsed    = 0;
+
+function pad2(n){ return String(n).padStart(2,"0"); }
+function fmt(s){ return pad2(Math.floor(s/60))+":"+pad2(s%60); }
+
+function setStatus(msg, cls){
+  statusEl.className = "status "+(cls||"");
+  statusEl.textContent = msg;
+}
+function showBadge(txt, color, pulse){
+  badge.style.display = "flex";
+  badgeTxt.textContent = txt;
+  dot.style.background = color;
+  dot.className = "dot"+(pulse?" pulse":"");
+}
+
+// ─── Stop & release all media tracks immediately ─────────────────────────
+function stopAllMediaTracks() {
+  if (scrStream) {
+    try { scrStream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){}
+    scrStream = null;
+  }
+  if (camStream) {
+    try { camStream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){}
+    camStream = null;
+  }
+  if (vLive) {
+    try { vLive.pause(); } catch(e){}
+    vLive.srcObject = null;
+  }
+}
+
+// ─── Initialise camera ───────────────────────────────────────────────────
+function initCamera() {
+  stopAllMediaTracks();
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    setStatus("Camera API not available — use Chrome or Firefox.");
+    return;
+  }
+  navigator.mediaDevices.getUserMedia({
+    video:{width:{ideal:1280},height:{ideal:720}}, audio:true
+  }).then(function(stream){
+    camStream = stream;
+    vLive.srcObject = stream;
+    vLive.style.display = "block";
+    placeholder.style.display = "none";
+    btnStart.disabled = false;
+    showBadge("Camera Ready","#3fb950",false);
+    setStatus("Camera ready. Click Start Exam Recording to begin.", "ready");
+    window.Streamlit.setFrameHeight(440);
+  }).catch(function(e1){
+    navigator.mediaDevices.getUserMedia({
+      video:{width:{ideal:1280},height:{ideal:720}}, audio:false
+    }).then(function(stream){
+      camStream = stream;
+      vLive.srcObject = stream;
+      vLive.style.display = "block";
+      placeholder.style.display = "none";
+      btnStart.disabled = false;
+      showBadge("Camera Ready (no mic)","#e3b341",false);
+      setStatus("Camera ready (microphone unavailable). Click Start Exam Recording.", "ready");
+      window.Streamlit.setFrameHeight(440);
+    }).catch(function(e2){
+      setStatus("Camera access denied: "+e2.message+". Allow camera in browser settings.");
+    });
+  });
+}
+
+window.addEventListener("load", initCamera);
+
+// ─── Start Recording (Webcam + Screen) ───────────────────────────────────
+btnStart.addEventListener("click", function(){
+  if(!camStream){ setStatus("Camera not ready."); return; }
+  btnStart.style.display = "none";
+  setStatus("Select Entire Screen in the browser dialog (Cancel to skip screen share).", "");
+
+  var tryDisplay = (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)
+    ? navigator.mediaDevices.getDisplayMedia({video:{displaySurface:"monitor"},audio:false})
+    : Promise.reject("not supported");
+
+  tryDisplay.then(function(sc){
+    scrStream = sc;
+    screenPill.style.display = "block";
+    screenWarn.style.display = "none";
+    screenStatus = "Completed";
+    screenEvents = [{timestamp: "00:00", event: "Screen Sharing Started", status: "Normal"}];
+
+    // Detect if candidate prematurely stops screen sharing
+    if (scrStream.getVideoTracks().length > 0) {
+      scrStream.getVideoTracks()[0].onended = function(){
+        screenStatus = "Interrupted";
+        screenWarn.style.display = "block";
+        screenPill.style.display = "none";
+        screenEvents.push({timestamp: fmt(elapsed), event: "Screen Sharing Interrupted", status: "Warning"});
+        setStatus("⚠️ Warning: Screen sharing was stopped by candidate during examination!", "recording");
+      };
+    }
+    beginDualRecording();
+  }).catch(function(){
+    scrStream = null;
+    screenPill.style.display = "none";
+    screenWarn.style.display = "none";
+    screenStatus = "Not Captured";
+    screenEvents = [{timestamp: "00:00", event: "Screen Sharing Skipped", status: "Notice"}];
+    beginDualRecording();
+  });
+});
+
+function beginDualRecording(){
+  chunks = []; scrChunks = []; elapsed = 0;
+  var types = ["video/webm;codecs=vp8,opus","video/webm;codecs=vp8","video/webm",""];
+  var opts = {};
+  for(var i=0;i<types.length;i++){
+    if(!types[i]||MediaRecorder.isTypeSupported(types[i])){
+      if(types[i]) opts={mimeType:types[i]};
+      break;
+    }
+  }
+
+  // 1. Webcam Recorder
+  try{ webRecorder = new MediaRecorder(camStream, opts); }
+  catch(e){ webRecorder = new MediaRecorder(camStream); }
+
+  webRecorder.ondataavailable = function(e){
+    if(e.data && e.data.size>0) chunks.push(e.data);
+  };
+
+  // 2. Screen Recorder (if screen capture active)
+  if (scrStream) {
+    try{ scrRecorder = new MediaRecorder(scrStream, opts); }
+    catch(e){ try{ scrRecorder = new MediaRecorder(scrStream); }catch(e2){} }
+    if (scrRecorder) {
+      scrRecorder.ondataavailable = function(e){
+        if(e.data && e.data.size>0) scrChunks.push(e.data);
+      };
+      scrRecorder.start(500);
+    }
+  }
+
+  webRecorder.onstop = function(){
+    clearInterval(tickId);
+    var mime = webRecorder.mimeType||"video/webm";
+    var webBlob = new Blob(chunks, {type:mime});
+    var scrBlob = scrChunks.length > 0 ? new Blob(scrChunks, {type:mime}) : null;
+
+    // Stop MediaStream tracks so hardware camera LED and screen bar turn OFF
+    stopAllMediaTracks();
+
+    // Show playback preview
+    var url = URL.createObjectURL(webBlob);
+    vLive.style.display  = "none";
+    vDone.src            = url;
+    vDone.style.display  = "block";
+
+    btnStop.style.display  = "none";
+    btnReset.style.display = "inline-flex";
+    screenPill.style.display = "none";
+    showBadge("Done "+fmt(elapsed),"#3fb950",false);
+    setStatus("Recording complete ("+fmt(elapsed)+"). Processing streams for AI analysis\u2026", "done");
+    window.Streamlit.setFrameHeight(480);
+
+    // Convert both blobs to Base64 and return payload to Python
+    var readerWeb = new FileReader();
+    readerWeb.onloadend = function(){
+      var webB64 = readerWeb.result;
+      if (scrBlob) {
+        var readerScr = new FileReader();
+        readerScr.onloadend = function(){
+          var payload = {
+            webcam: webB64,
+            screen: readerScr.result,
+            screen_status: screenStatus,
+            screen_events: screenEvents,
+            duration_sec: elapsed
+          };
+          window.Streamlit.setComponentValue(JSON.stringify(payload));
+          setStatus("Exam recorded ("+fmt(elapsed)+"). AI proctoring analysis starting...", "done");
+        };
+        readerScr.readAsDataURL(scrBlob);
+      } else {
+        var payload = {
+          webcam: webB64,
+          screen: null,
+          screen_status: screenStatus,
+          screen_events: screenEvents,
+          duration_sec: elapsed
+        };
+        window.Streamlit.setComponentValue(JSON.stringify(payload));
+        setStatus("Exam recorded ("+fmt(elapsed)+"). AI proctoring analysis starting...", "done");
+      }
+    };
+    readerWeb.readAsDataURL(webBlob);
+  };
+
+  webRecorder.onerror = function(ev){
+    setStatus("Recorder error: "+(ev.error?ev.error.message:String(ev)));
+  };
+
+  webRecorder.start(500);
+  btnStop.style.display = "inline-flex";
+  btnStop.disabled = false;
+  showBadge("Recording 00:00","#f85149",true);
+  setStatus("Recording exam. You may switch tabs — screen recording continues in background.", "recording");
+  tickId = setInterval(function(){
+    elapsed++;
+    badgeTxt.textContent = "Recording "+fmt(elapsed);
+  }, 1000);
+  window.Streamlit.setFrameHeight(440);
+}
+
+// ─── Stop ─────────────────────────────────────────────────────────────────
+btnStop.addEventListener("click", function(){
+  btnStop.disabled = true;
+  if(webRecorder && webRecorder.state!=="inactive") webRecorder.stop();
+  if(scrRecorder && scrRecorder.state!=="inactive") try{ scrRecorder.stop(); }catch(e){}
+  stopAllMediaTracks();
+});
+
+// ─── Reset / Record Again ──────────────────────────────────────────────────
+btnReset.addEventListener("click", function(){
+  vDone.style.display   = "none";
+  vDone.src             = "";
+  btnReset.style.display = "none";
+  btnStart.style.display = "inline-flex";
+  btnStart.disabled      = true;
+  btnStop.style.display  = "none";
+  screenWarn.style.display = "none";
+  window.Streamlit.setComponentValue(null);
+  setStatus("Re-initialising camera...", "");
+  initCamera();
+});
+
+window.Streamlit.events.addEventListener("streamlit:render", function(){
+  window.Streamlit.setFrameHeight(440);
+});
+</script>
+</body>
+</html>

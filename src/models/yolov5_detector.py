@@ -5,7 +5,7 @@ As specified in project_report.pdf (Ramzan et al., 2024).
 """
 
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 import numpy as np
 import yaml
 from src.config import CLASS_NAMES, NUM_CLASSES, YOLOV5_DATA_DIR, RAW_PUBLIC_DATASET_DIR, WEIGHTS_DIR
@@ -22,14 +22,14 @@ class YOLOv5Detector:
 
     def __init__(
         self,
-        weights_path: Optional[Path] = None,
+        weights_path: Optional[Union[str, Path]] = None,
         device: str = "cpu",
         conf_threshold: float = 0.25
     ):
         self.device = device
         self.conf_threshold = conf_threshold
         self.model_name = "yolov5"
-        self.weights_path = weights_path
+        self.weights_path = Path(weights_path) if weights_path else None
         self.model = None
 
         self._initialize_model()
@@ -46,7 +46,6 @@ class YOLOv5Detector:
                 self.weights_path = target_pt
                 logger.info(f"Loaded YOLOv5 custom checkpoint from {target_pt}")
             else:
-                # Load standard YOLOv5 nano/small backbone for structural initialization
                 self.model = YOLO("yolov5s.pt")
                 logger.info("Initialized default YOLOv5s architecture backbone.")
         except Exception as e:
@@ -114,6 +113,10 @@ class YOLOv5Detector:
                 })
 
         return detections
+
+    def detect(self, frame: np.ndarray) -> List[Dict[str, Any]]:
+        """Alias for predict_frame."""
+        return self.predict_frame(frame)
 
     def get_summary(self) -> Dict[str, Any]:
         """Returns metadata summary for YOLOv5 model branch."""
